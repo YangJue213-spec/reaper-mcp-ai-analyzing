@@ -11,6 +11,7 @@ A Model Context Protocol (MCP) server for REAPER DAW with **AI-powered audio ana
 
 - **25+ MCP Tools** for REAPER control (tracks, FX, routing, media items)
 - **AI Audio Analysis** - Analyze mixes with ANY audio-capable AI model
+- **VST3 Plugin Recognition** - Smart plugin matching with VST3 priority (700+ plugins supported)
 - **File-based IPC** - No network required, works on macOS/Windows/Linux
 - **Multi-Provider Support** - OpenAI, Google Gemini, Anthropic Claude, and any OpenAI-compatible API
 
@@ -114,7 +115,8 @@ REAPER_SCRIPT_TIMEOUT=30000
 
 #### FX Control
 - `get_track_fx` - List all FX on a track
-- `add_fx_to_track` - Add plugin (supports Waves, FabFilter, generic)
+- `get_available_plugins` - Search available plugins from REAPER cache (VST3/VST/AU)
+- `add_fx_to_track` - Add plugin with automatic VST3 priority and Mono/Stereo detection
 - `remove_fx_from_track` - Remove FX by index
 - `get_fx_params` - Get all parameters of an FX
 - `set_fx_param` - Set parameter by absolute value
@@ -202,6 +204,7 @@ npm start
 
 - **25+ MCP 工具** 用于 REAPER 控制
 - **AI 音频分析** - 使用任何支持音频的 AI 模型分析混音
+- **VST3 插件识别** - 智能插件匹配，优先使用 VST3（支持 700+ 插件）
 - **文件 IPC** - 无需网络，支持 macOS/Windows/Linux
 - **多提供商支持** - OpenAI、Google Gemini、Anthropic Claude
 
@@ -278,6 +281,38 @@ REAPER_SCRIPT_TIMEOUT=30000
   }
 }
 ```
+
+### 🎮 MCP 工具
+
+#### 工程与轨道控制
+- `get_project_info` - 获取工程采样率、速度、轨道数量
+- `get_track_info` - 获取轨道详情（音量、声像、效果器数量等）
+- `create_track` - 创建新轨道（可选命名）
+- `delete_track` - 按索引删除轨道
+- `set_track_name` - 重命名轨道
+- `set_track_volume` - 设置音量（dB）
+- `set_track_pan` - 设置声像（-1 到 1）
+- `set_track_send` - 创建发送到其他轨道
+- `set_track_output` - 设置轨道输出路由
+
+#### 效果器控制
+- `get_track_fx` - 列出轨道上的所有效果器
+- `get_available_plugins` - 从 REAPER 缓存搜索可用插件（VST3/VST/AU）
+- `add_fx_to_track` - 添加插件，自动优先使用 VST3 并检测单声道/立体声
+- `remove_fx_from_track` - 按索引移除效果器
+- `get_fx_params` - 获取效果器的所有参数
+- `set_fx_param` - 使用绝对值设置参数
+- `set_fx_param_normalized` - 使用归一化值（0-1）设置参数
+- `set_fx_enabled` - 启用/禁用效果器
+
+#### 媒体项目
+- `get_item_info` - 获取项目位置、长度、淡入淡出
+- `split_item` - 在指定位置分割项目
+
+#### AI 分析（核心功能）
+- `analyze_and_suggest_mix` - 渲染并使用 AI 分析音频
+- `start_audio_analysis` - 启动异步分析任务
+- `get_analysis_status` - 检查分析进度
 
 ### 🎵 使用方法
 

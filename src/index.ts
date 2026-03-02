@@ -172,8 +172,26 @@ class ReaperMCPServer {
         },
         {
           name: 'list_available_fx',
-          description: 'Get list of all available FX plugins',
+          description: 'Get list of all available FX plugins (Legacy - uses Lua, may timeout)',
           inputSchema: { type: 'object', properties: {} },
+        },
+        {
+          name: 'get_available_plugins',
+          description: 'Get available plugins from REAPER cache files with optional search. Parses local plugin cache files directly for accurate names. Use this before add_fx_to_track to get exact plugin names.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              searchQuery: {
+                type: 'string',
+                description: 'Optional search keyword for fuzzy matching (e.g., "CLA-2A", "Pro-Q", "compressor")'
+              },
+              maxResults: {
+                type: 'number',
+                default: 10,
+                description: 'Maximum number of results to return (default: 10, max: 50)'
+              }
+            },
+          },
         },
         {
           name: 'get_track_fx',
@@ -354,7 +372,12 @@ class ReaperMCPServer {
           case 'create_track': {
             const { trackName } = args as { trackName?: string };
             const result = await this.client.createTrack(trackName);
-            return { content: [{ type: 'text', text: `Created track ${result.trackNumber}: ${result.name || 'Unnamed'}` }] };
+            return { 
+              content: [{ 
+                type: 'text', 
+                text: `Created track ${result.trackNumber} (trackIndex: ${result.trackIndex}): ${result.name || 'Unnamed'}\n\nTip: Use trackIndex=${result.trackIndex} for subsequent operations like add_fx_to_track.`
+              }] 
+            };
           }
 
           case 'delete_track': {
@@ -426,6 +449,24 @@ class ReaperMCPServer {
           case 'list_available_fx': {
             const data = await this.client.listAvailableFX();
             return { content: [{ type: 'text', text: `Available FX plugins (${data.length}):\n${data.slice(0, 50).join('\n')}` }] };
+          }
+
+          case 'get_available_plugins': {
+            const { searchQuery, maxResults } = args as { searchQuery?: string; maxResults?: number };
+            const result = await this.client.getAvailablePlugins(searchQuery, maxResults);
+            
+            const header = searchQuery 
+              ? `Found ${result.count} plugins matching "${searchQuery}" (source: ${result.source}):`
+              : `Available plugins (source: ${result.source}):`;
+            
+            const pluginsList = result.plugins.map((plugin, i) => `${i + 1}. ${plugin}`).join('\n');
+            
+            return { 
+              content: [{ 
+                type: 'text', 
+                text: `${header}\n${pluginsList}\n\nTip: Use the exact plugin name with add_fx_to_track.`
+              }] 
+            };
           }
 
           case 'get_track_fx': {

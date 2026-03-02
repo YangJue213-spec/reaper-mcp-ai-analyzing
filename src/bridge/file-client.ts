@@ -4,6 +4,7 @@ import { promises as fs } from 'fs';
 import { join } from 'path';
 import { ReaperConfig, ProjectInfo, TrackInfo, FXInfo, FXParam, MediaItemInfo, RenderResult } from '../types/reaper.js';
 import { Logger } from '../utils/logger.js';
+import { ReaperPluginParser } from '../utils/plugin-parser.js';
 
 /**
  * File-based IPC Client for REAPER MCP Server
@@ -15,6 +16,7 @@ export class ReaperFileClient {
   private commandFile: string;
   private responseFile: string;
   private isProcessing: boolean = false;
+  private pluginParser: ReaperPluginParser;
 
   constructor(config: ReaperConfig = {}) {
     this.config = {
@@ -26,6 +28,7 @@ export class ReaperFileClient {
     this.ipcDir = this.config.ipcDir!;
     this.commandFile = join(this.ipcDir, 'command.json');
     this.responseFile = join(this.ipcDir, 'response.json');
+    this.pluginParser = new ReaperPluginParser();
   }
 
   /**
@@ -175,8 +178,98 @@ export class ReaperFileClient {
     return this.sendCommand('get_track_fx', { trackIndex });
   }
 
+  async getAvailablePlugins(searchQuery?: string, maxResults?: number, forceRefresh?: boolean): Promise<{
+    plugins: string[];
+    count: number;
+    source: 'cache' | 'fallback';
+    searchQuery?: string;
+  }> {
+    return this.pluginParser.getAvailablePlugins(searchQuery, maxResults, forceRefresh);
+  }
+
   async addFXToTrack(trackIndex: number, fxName: string, vendor?: string): Promise<any> {
-    return this.sendCommand('add_fx_to_track_smart', { trackIndex, fxName, vendor });
+    // Step 1: Search for plugins matching the input name
+    const searchResults = await this.pluginParser.getAvailablePlugins(fxName, 50);
+    
+    if (searchResults.plugins.length === 0) {
+      throw new Error(`No plugins found matching "${fxName}"`);
+    }
+
+    // Step 2: Get track channel info
+    const trackInfo = await this.getTrackInfo(trackIndex);
+    const isMono = trackInfo.isMono || false;
+    Logger.info(`[addFXToTrack] Track ${trackIndex} is ${isMono ? 'mono' : 'stereo'}, searching for "${fxName}"`);
+
+    // Step 3: Filter and score matching plugins
+    const plugins = searchResults.plugins;
+    const scoredPlugins: { plugin: string; score: number }[] = [];
+    
+    for (const plugin of plugins) {
+      const pluginLower = plugin.toLowerCase();
+      const nameLower = fxName.toLowerCase();
+      
+      // Check if plugin contains the base name
+      if (!pluginLower.includes(nameLower)) continue;
+      
+      let score = 0;
+      
+      // ===== STRONGLY PREFER VST3 =====
+      if (plugin.startsWith('VST3:')) {
+        score += 1000;  // Very high priority for VST3
+      } else if (plugin.startsWith('VST:')) {
+        score += 50;
+      } else if (plugin.startsWith('AU:')) {
+        score += 25;
+      }
+      
+      // Check for Mono/Stereo indicators
+      const isPluginMono = pluginLower.includes('mono') || pluginLower.includes('(m)');
+      const isPluginStereo = pluginLower.includes('stereo') || pluginLower.includes('(s)');
+      
+      // Score based on channel match
+      if (isMono && isPluginMono) {
+        score += 200;
+      } else if (!isMono && isPluginStereo) {
+        score += 200;
+      } else if (!isPluginMono && !isPluginStereo) {
+        score += 100;
+      } else if (isMono && isPluginStereo) {
+        score -= 50;
+      } else if (!isMono && isPluginMono) {
+        score -= 50;
+      }
+      
+      // Prefer Waves/FabFilter plugins with proper naming
+      if (plugin.includes('(Waves)') || plugin.includes('(FabFilter)')) {
+        score += 50;
+      }
+      
+      scoredPlugins.push({ plugin, score });
+    }
+
+    // Sort by score descending
+    scoredPlugins.sort((a, b) => b.score - a.score);
+    
+    // Get best match
+    let bestMatch: string | null = scoredPlugins.length > 0 ? scoredPlugins[0].plugin : null;
+
+    // If no match found with name filtering, try first result
+    if (!bestMatch && plugins.length > 0) {
+      bestMatch = plugins[0];
+    }
+
+    if (!bestMatch) {
+      throw new Error(`Could not find suitable plugin match for "${fxName}"`);
+    }
+
+    Logger.info(`[addFXToTrack] Matched "${fxName}" to "${bestMatch}" (isMono: ${isMono})`);
+    
+    // Step 4: Add the FX with the exact matched name
+    return this.sendCommand('add_fx_to_track_smart', { 
+      trackIndex, 
+      fxName: bestMatch, 
+      vendor: vendor || 'generic' 
+    });
   }
 
   async removeFXFromTrack(trackIndex: number, fxIndex: number): Promise<void> {
