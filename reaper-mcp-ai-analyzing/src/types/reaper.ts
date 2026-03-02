@@ -1,20 +1,8 @@
-// REAPER MCP Server Type Definitions
+// REAPER MCP AI Analyzing - Type Definitions
 
 export interface ReaperConfig {
-  reaperPath?: string;
-  pythonPath?: string;
   scriptTimeout?: number;
-  host?: string;
-  port?: number;
-}
-
-export interface AudioAnalysisResult {
-  itemLength: number;
-  sampleRate: number;
-  numChannels: number;
-  peakLevel: number;
-  rmsLevel: number;
-  lufs?: number;
+  ipcDir?: string;
 }
 
 export interface ProjectInfo {
@@ -30,7 +18,7 @@ export interface ProjectInfo {
 export interface TrackInfo {
   trackNumber: number;
   name: string;
-  volume: number;
+  volumeDb: number;
   pan: number;
   mute: boolean;
   solo: boolean;
@@ -44,26 +32,19 @@ export interface FXInfo {
   fxIndex: number;
   name: string;
   enabled: boolean;
-  paramCount: number;
+  paramCount?: number;
 }
 
 export interface FXParam {
   paramIndex: number;
   name: string;
   value: number;
-  minValue: number;
-  maxValue: number;
+  min: number;
+  max: number;
   normalizedValue: number;
 }
 
-export interface FXPreset {
-  name: string;
-  index: number;
-}
-
 export interface MediaItemInfo {
-  itemIndex: number;
-  trackNumber: number;
   position: number;
   length: number;
   fadeIn: number;
@@ -72,17 +53,72 @@ export interface MediaItemInfo {
   sourceFile?: string;
 }
 
-export interface RenderSettings {
-  outputPath: string;
-  sampleRate?: number;
-  bitDepth?: number;
-  channels?: number;
-  format?: 'WAV' | 'AIFF' | 'FLAC' | 'MP3';
-  quality?: number;
+export interface AudioAnalysisResult {
+  itemLength: number;
+  sampleRate: number;
+  numChannels: number;
+  peakLevel: number;
+  rmsLevel?: number;
+  lufs?: number;
 }
+
+export interface LoudnessData {
+  integratedLufs: number;
+  truePeak: number;
+  loudnessRange: number;
+  threshold: number;
+}
+
+export interface RenderResult {
+  filePath: string;
+  renderMode: string;
+  trackId?: string;
+  trackIds?: string[];
+  startTime: number;
+  endTime: number;
+  status: string;
+  statusFile?: string;
+}
+
+export interface AnalysisTask {
+  taskId: string;
+  status: 'pending' | 'rendering' | 'analyzing' | 'completed' | 'failed';
+  progress: number;
+  params: any;
+  renderStatusFile?: string;
+  audioFilePath?: string;
+  result?: AIAnalysisResult;
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AIAnalysisResult {
+  suggestions: string;
+  technicalDetails?: {
+    eq?: string[];
+    compression?: string[];
+    loudness?: string;
+    stereoWidth?: string;
+    recommendations?: string[];
+  };
+  provider: string;
+  model: string;
+  timestamp: number;
+}
+
+export interface AIProviderConfig {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  maxAudioDuration?: number;
+}
+
+export type RenderMode = 'solo' | 'master' | 'chorus' | 'multi';
 
 export interface ReaperScriptResult {
   success: boolean;
   data?: any;
   error?: string;
+  id?: string;
 }

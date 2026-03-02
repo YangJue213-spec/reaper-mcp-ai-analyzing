@@ -9,222 +9,50 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { promises as fs } from 'fs';
 import { join } from 'path';
-import OpenAI from 'openai';
-import { config } from 'dotenv';
-import { spawn } from 'child_process';
 
-import { ReaperFileClient } from './reaper/file-client.js';
-
-// ===== Audio Loudness Analysis using FFmpeg =====
-interface LoudnessData {
-  integratedLufs: number;
-  truePeak: number;
-  loudnessRange: number;
-  threshold: number;
-}
-
-/**
- * Analyze audio file loudness using FFmpeg's loudnorm filter
- * This provides accurate LUFS-I, True Peak, and Loudness Range measurements
- */
-async function analyzeLoudness(audioFilePath: string): Promise<LoudnessData> {
-  return new Promise((resolve, reject) => {
-    const args = [
-      '-i', audioFilePath,
-      '-af', 'loudnorm=print_format=json',
-      '-f', 'null',
-      '-'
-    ];
-    
-    const ffmpeg = spawn('ffmpeg', args);
-    let stderr = '';
-    
-    ffmpeg.stderr.on('data', (data) => {
-      stderr += data.toString();
-    });
-    
-    ffmpeg.on('close', (code) => {
-      // FFmpeg outputs loudnorm stats to stderr
-      try {
-        // Extract JSON from stderr
-        const jsonMatch = stderr.match(/\{\s*"input_i"[^}]+\}/s);
-        if (jsonMatch) {
-          const stats = JSON.parse(jsonMatch[0]);
-          
-          // Parse values - convert from string to number
-          const integratedLufs = parseFloat(stats.input_i) || -23.0;
-          const truePeak = parseFloat(stats.input_tp) || -1.0;
-          const loudnessRange = parseFloat(stats.input_lra) || 0.0;
-          const threshold = parseFloat(stats.input_thresh) || -30.0;
-          
-          resolve({
-            integratedLufs,
-            truePeak,
-            loudnessRange,
-            threshold
-          });
-        } else {
-          // Fallback: try to parse individual values
-          const iMatch = stderr.match(/input_i:\s*([-\d.]+)/);
-          const tpMatch = stderr.match(/input_tp:\s*([-\d.]+)/);
-          const lraMatch = stderr.match(/input_lra:\s*([-\d.]+)/);
-          
-          if (iMatch) {
-            resolve({
-              integratedLufs: parseFloat(iMatch[1]),
-              truePeak: tpMatch ? parseFloat(tpMatch[1]) : -1.0,
-              loudnessRange: lraMatch ? parseFloat(lraMatch[1]) : 0.0,
-              threshold: -30.0
-            });
-          } else {
-            // If parsing fails, return default values
-            console.error('[analyzeLoudness] Failed to parse FFmpeg output, using defaults');
-            resolve({
-              integratedLufs: -23.0,
-              truePeak: -1.0,
-              loudnessRange: 0.0,
-              threshold: -30.0
-            });
-          }
-        }
-      } catch (error) {
-        console.error('[analyzeLoudness] Error parsing FFmpeg output:', error);
-        reject(error);
-      }
-    });
-    
-    ffmpeg.on('error', (error) => {
-      console.error('[analyzeLoudness] FFmpeg spawn error:', error);
-      reject(error);
-    });
-  });
-}
-
-// Load environment variables
-config();
-
-// ===== Task Manager for Async Operations =====
-interface AnalysisTask {
-  taskId: string;
-  status: 'pending' | 'rendering' | 'analyzing' | 'completed' | 'failed';
-  progress: number;
-  params: any;
-  renderStatusFile?: string;
-  audioFilePath?: string;
-  result?: any;
-  error?: string;
-  createdAt: number;
-  updatedAt: number;
-}
-
-class TaskManager {
-  private tasks: Map<string, AnalysisTask> = new Map();
-  private tasksDir: string = '/tmp/reaper-mcp/tasks';
-
-  constructor() {
-    this.ensureTasksDir();
-  }
-
-  private async ensureTasksDir() {
-    try {
-      await fs.mkdir(this.tasksDir, { recursive: true });
-    } catch (e) {
-      console.error('Failed to create tasks directory:', e);
-    }
-  }
-
-  createTask(params: any): AnalysisTask {
-    const taskId = `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    const task: AnalysisTask = {
-      taskId,
-      status: 'pending',
-      progress: 0,
-      params,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    };
-    this.tasks.set(taskId, task);
-    this.saveTask(task);
-    return task;
-  }
-
-  getTask(taskId: string): AnalysisTask | undefined {
-    return this.tasks.get(taskId);
-  }
-
-  updateTask(taskId: string, updates: Partial<AnalysisTask>) {
-    const task = this.tasks.get(taskId);
-    if (task) {
-      Object.assign(task, updates, { updatedAt: Date.now() });
-      this.saveTask(task);
-    }
-  }
-
-  private async saveTask(task: AnalysisTask) {
-    try {
-      const taskFile = join(this.tasksDir, `${task.taskId}.json`);
-      await fs.writeFile(taskFile, JSON.stringify(task, null, 2));
-    } catch (e) {
-      console.error('Failed to save task:', e);
-    }
-  }
-
-  async cleanupOldTasks(maxAgeMs: number = 3600000) { // 1 hour
-    const now = Date.now();
-    for (const [taskId, task] of this.tasks.entries()) {
-      if (now - task.createdAt > maxAgeMs) {
-        this.tasks.delete(taskId);
-        try {
-          const taskFile = join(this.tasksDir, `${taskId}.json`);
-          await fs.unlink(taskFile).catch(() => {});
-          // Cleanup audio file if exists
-          if (task.audioFilePath) {
-            await fs.unlink(task.audioFilePath).catch(() => {});
-          }
-        } catch (e) {
-          // Ignore cleanup errors
-        }
-      }
-    }
-  }
-}
+import { ReaperFileClient } from './bridge/file-client.js';
+import { AudioAnalyzer } from './ai/analyzer.js';
+import { OpenAIProvider } from './ai/providers/openai.js';
+import { EnvConfig } from './utils/env.js';
+import { Logger } from './utils/logger.js';
 
 class ReaperMCPServer {
   private server: Server;
   private client: ReaperFileClient;
-  private taskManager: TaskManager;
-  private openai: OpenAI;
+  private analyzer: AudioAnalyzer | null = null;
+  private tasks: Map<string, any> = new Map();
 
   constructor() {
-    // Initialize File-based IPC client (compatible with Mac M4)
     this.client = new ReaperFileClient({
-      scriptTimeout: parseInt(process.env.REAPER_SCRIPT_TIMEOUT || '10000'),
+      scriptTimeout: EnvConfig.getReaperTimeout(),
     });
 
-    this.taskManager = new TaskManager();
-
-    this.openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-      baseURL: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
-    });
+    // Initialize AI analyzer if API key is available
+    try {
+      const aiConfig = EnvConfig.getOpenAIConfig();
+      const provider = new OpenAIProvider(aiConfig);
+      this.analyzer = new AudioAnalyzer(provider);
+      Logger.info('AI Analyzer initialized');
+    } catch (error) {
+      Logger.warn('AI Analyzer not initialized - API key missing');
+    }
 
     this.server = new Server({
-      name: 'reaper-mcp-server',
+      name: 'reaper-mcp-ai-analyzing',
       version: '1.0.0',
     });
 
     this.setupToolHandlers();
     
-    // Error handling
-    this.server.onerror = (error: any) => console.error('[MCP Error]', error);
+    this.server.onerror = (error: any) => Logger.error('[MCP Error]', error);
     process.on('SIGINT', async () => {
       await this.client.disconnect();
       await this.server.close();
       process.exit(0);
     });
 
-    // Periodic cleanup of old tasks
-    setInterval(() => this.taskManager.cleanupOldTasks(), 600000); // Every 10 minutes
+    // Periodic cleanup
+    setInterval(() => this.cleanupOldTasks(), 600000);
   }
 
   private setupToolHandlers() {
@@ -250,9 +78,7 @@ class ReaperMCPServer {
           description: 'Create a new track with optional name',
           inputSchema: {
             type: 'object',
-            properties: { 
-              trackName: { type: 'string', description: 'Optional name for the new track' } 
-            },
+            properties: { trackName: { type: 'string' } },
           },
         },
         {
@@ -260,9 +86,7 @@ class ReaperMCPServer {
           description: 'Delete a track by index',
           inputSchema: {
             type: 'object',
-            properties: { 
-              trackIndex: { type: 'number', description: 'Track index to delete (0-based)' } 
-            },
+            properties: { trackIndex: { type: 'number' } },
             required: ['trackIndex'],
           },
         },
@@ -272,8 +96,8 @@ class ReaperMCPServer {
           inputSchema: {
             type: 'object',
             properties: { 
-              trackIndex: { type: 'number', description: 'Track index (0-based)' },
-              trackName: { type: 'string', description: 'New name for the track' }
+              trackIndex: { type: 'number' },
+              trackName: { type: 'string' }
             },
             required: ['trackIndex', 'trackName'],
           },
@@ -292,34 +116,31 @@ class ReaperMCPServer {
           description: 'Set track pan (-1 to 1)',
           inputSchema: {
             type: 'object',
-            properties: { 
-              trackIndex: { type: 'number' }, 
-              pan: { type: 'number', minimum: -1, maximum: 1 } 
-            },
+            properties: { trackIndex: { type: 'number' }, pan: { type: 'number' } },
             required: ['trackIndex', 'pan'],
           },
         },
         {
           name: 'set_track_send',
-          description: 'Create a send from source track to destination track (parallel routing)',
+          description: 'Create a send from source track to destination track',
           inputSchema: {
             type: 'object',
             properties: { 
-              sourceTrackIndex: { type: 'number', description: 'Source track index' }, 
-              destTrackIndex: { type: 'number', description: 'Destination track index' },
-              volumeDb: { type: 'number', description: 'Send volume in dB (default: 0)' }
+              sourceTrackIndex: { type: 'number' }, 
+              destTrackIndex: { type: 'number' },
+              volumeDb: { type: 'number' }
             },
             required: ['sourceTrackIndex', 'destTrackIndex'],
           },
         },
         {
           name: 'set_track_output',
-          description: 'Set track output destination (changes main output routing)',
+          description: 'Set track output destination (-1 for master)',
           inputSchema: {
             type: 'object',
             properties: { 
-              sourceTrackIndex: { type: 'number', description: 'Source track index' }, 
-              destTrackIndex: { type: 'number', description: 'Destination track index (-1 for master)' }
+              sourceTrackIndex: { type: 'number' }, 
+              destTrackIndex: { type: 'number' }
             },
             required: ['sourceTrackIndex', 'destTrackIndex'],
           },
@@ -330,13 +151,9 @@ class ReaperMCPServer {
           inputSchema: {
             type: 'object',
             properties: { 
-              sourceTrackIndices: { 
-                type: 'array', 
-                items: { type: 'number' },
-                description: 'Array of source track indices' 
-              }, 
-              destTrackIndex: { type: 'number', description: 'Destination track index' },
-              volumeDb: { type: 'number', description: 'Send volume in dB (default: 0)' }
+              sourceTrackIndices: { type: 'array', items: { type: 'number' } }, 
+              destTrackIndex: { type: 'number' },
+              volumeDb: { type: 'number' }
             },
             required: ['sourceTrackIndices', 'destTrackIndex'],
           },
@@ -347,38 +164,16 @@ class ReaperMCPServer {
           inputSchema: {
             type: 'object',
             properties: { 
-              sourceTrackIndices: { 
-                type: 'array', 
-                items: { type: 'number' },
-                description: 'Array of source track indices' 
-              }, 
-              destTrackIndex: { type: 'number', description: 'Destination track index (-1 for master)' }
+              sourceTrackIndices: { type: 'array', items: { type: 'number' } }, 
+              destTrackIndex: { type: 'number' }
             },
             required: ['sourceTrackIndices', 'destTrackIndex'],
           },
         },
         {
           name: 'list_available_fx',
-          description: 'Get list of all available FX plugins (Legacy - uses Lua, may timeout)',
+          description: 'Get list of all available FX plugins',
           inputSchema: { type: 'object', properties: {} },
-        },
-        {
-          name: 'get_available_plugins',
-          description: 'Get available plugins from REAPER cache files with optional search. Parses local plugin cache files directly for accurate names. Use this before add_fx_to_track to get exact plugin names.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              searchQuery: {
-                type: 'string',
-                description: 'Optional search keyword for fuzzy matching (e.g., "CLA-2A", "Pro-Q", "compressor")'
-              },
-              maxResults: {
-                type: 'number',
-                default: 10,
-                description: 'Maximum number of results to return (default: 10, max: 50)'
-              }
-            },
-          },
         },
         {
           name: 'get_track_fx',
@@ -391,17 +186,13 @@ class ReaperMCPServer {
         },
         {
           name: 'add_fx_to_track',
-          description: 'Add an FX plugin to a track with automatic Mono/Stereo detection. Supports Waves, FabFilter, and generic plugins.',
+          description: 'Add an FX plugin to a track',
           inputSchema: {
             type: 'object',
             properties: { 
-              trackIndex: { type: 'number', description: 'Track index to add FX to' }, 
-              fxName: { type: 'string', description: 'Base FX name (e.g., "Pro-Q 3", "API-550", "ReaEQ"). Mono/Stereo suffix will be auto-added based on track configuration.' },
-              vendor: { 
-                type: 'string', 
-                enum: ['waves', 'fabfilter', 'generic'],
-                description: 'Plugin vendor type for proper naming convention. Default: generic'
-              }
+              trackIndex: { type: 'number' }, 
+              fxName: { type: 'string' },
+              vendor: { type: 'string', enum: ['waves', 'fabfilter', 'generic'] }
             },
             required: ['trackIndex', 'fxName'],
           },
@@ -411,10 +202,7 @@ class ReaperMCPServer {
           description: 'Remove an FX from a track',
           inputSchema: {
             type: 'object',
-            properties: { 
-              trackIndex: { type: 'number' }, 
-              fxIndex: { type: 'number', description: 'Index of the FX to remove' } 
-            },
+            properties: { trackIndex: { type: 'number' }, fxIndex: { type: 'number' } },
             required: ['trackIndex', 'fxIndex'],
           },
         },
@@ -423,10 +211,7 @@ class ReaperMCPServer {
           description: 'Get all parameters of an FX',
           inputSchema: {
             type: 'object',
-            properties: { 
-              trackIndex: { type: 'number' }, 
-              fxIndex: { type: 'number' } 
-            },
+            properties: { trackIndex: { type: 'number' }, fxIndex: { type: 'number' } },
             required: ['trackIndex', 'fxIndex'],
           },
         },
@@ -439,7 +224,7 @@ class ReaperMCPServer {
               trackIndex: { type: 'number' },
               fxIndex: { type: 'number' },
               paramIndex: { type: 'number' },
-              value: { type: 'number', description: 'Absolute parameter value' },
+              value: { type: 'number' },
             },
             required: ['trackIndex', 'fxIndex', 'paramIndex', 'value'],
           },
@@ -456,40 +241,6 @@ class ReaperMCPServer {
               normalizedValue: { type: 'number', minimum: 0, maximum: 1 },
             },
             required: ['trackIndex', 'fxIndex', 'paramIndex', 'normalizedValue'],
-          },
-        },
-        {
-          name: 'tweak_fx_parameter',
-          description: 'Tweak FX parameter by effect name (supports Waves, FabFilter, etc.). Finds FX by name and sets parameter using normalized value.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              trackIndex: { type: 'number', description: 'Track index containing the FX' },
-              fxName: { type: 'string', description: 'FX plugin name to search for (e.g., "VST: Pro-Q 3", "VST3: Waves API-550")' },
-              paramIndex: { type: 'number', description: 'Parameter index to adjust' },
-              normalizedValue: { type: 'number', minimum: 0, maximum: 1, description: 'Normalized value (0.0 to 1.0)' },
-            },
-            required: ['trackIndex', 'fxName', 'paramIndex', 'normalizedValue'],
-          },
-        },
-        {
-          name: 'manage_track_routing',
-          description: 'Manage track routing and sends with precise control. Supports add_send, remove_send, and set_master_send actions.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              action: { 
-                type: 'string', 
-                enum: ['add_send', 'remove_send', 'set_master_send'],
-                description: 'Routing action to perform'
-              },
-              sourceTrackIndex: { type: 'number', description: 'Source track index' },
-              destTrackIndex: { type: 'number', description: 'Destination track index (-1 for master). Required for add_send and remove_send.' },
-              enable: { type: 'boolean', description: 'Enable/disable master send (for set_master_send action)' },
-              sendVolumeDb: { type: 'number', default: 0, description: 'Send volume in dB (for add_send, default: 0)' },
-              sendPan: { type: 'number', minimum: -1, maximum: 1, default: 0, description: 'Send pan -1 (left) to 1 (right) (for add_send)' },
-            },
-            required: ['action', 'sourceTrackIndex'],
           },
         },
         {
@@ -511,9 +262,9 @@ class ReaperMCPServer {
           inputSchema: {
             type: 'object',
             properties: {
-              trackIndex: { type: 'number', description: 'Track index containing the item' },
-              itemIndex: { type: 'number', description: 'Item index to split' },
-              position: { type: 'number', description: 'Position in seconds where to split' },
+              trackIndex: { type: 'number' },
+              itemIndex: { type: 'number' },
+              position: { type: 'number' },
             },
             required: ['trackIndex', 'itemIndex', 'position'],
           },
@@ -531,96 +282,49 @@ class ReaperMCPServer {
           },
         },
         {
-          name: 'analyze_media_item',
-          description: 'Analyze audio properties of a media item (peak, sample rate, etc.)',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              trackIndex: { type: 'number' },
-              itemIndex: { type: 'number' },
-            },
-            required: ['trackIndex', 'itemIndex'],
-          },
-        },
-        {
           name: 'check_reaper_connection',
           description: 'Check if REAPER file bridge is active',
           inputSchema: { type: 'object', properties: {} },
         },
         {
           name: 'analyze_and_suggest_mix',
-          description: 'Analyze audio using AI and suggest mix improvements. Supports multiple render modes: solo (single track), master (full mix), chorus (time range), multi (multiple tracks together). Gets SWS loudness data and sends to AI for analysis.',
+          description: 'Analyze audio using AI and suggest mix improvements. Supports solo/master/chorus/multi modes.',
           inputSchema: {
             type: 'object',
             properties: {
-              trackId: { 
-                type: 'string', 
-                description: 'Track ID to analyze (number as string, or "master" for master track). Used in solo mode.' 
-              },
-              trackIds: {
-                type: 'array',
-                items: { type: 'string' },
-                description: 'Array of track IDs for multi-track analysis (used in "multi" renderMode)'
-              },
-              renderMode: {
-                type: 'string',
-                enum: ['solo', 'master', 'chorus', 'multi'],
-                description: 'Render mode: solo=isolate single track, master=full mix, chorus=time range of master, multi=multiple tracks together'
-              },
-              startTime: { 
-                type: 'number', 
-                description: 'Start time in seconds (default: 0)' 
-              },
-              endTime: { 
-                type: 'number', 
-                description: 'End time in seconds (default: project length)' 
-              },
+              trackId: { type: 'string', description: 'Track ID (number as string, or "master")' },
+              trackIds: { type: 'array', items: { type: 'string' }, description: 'Multiple track IDs for multi mode' },
+              renderMode: { type: 'string', enum: ['solo', 'master', 'chorus', 'multi'] },
+              startTime: { type: 'number', description: 'Start time in seconds' },
+              endTime: { type: 'number', description: 'End time in seconds' },
+              context: { type: 'string', description: 'Additional context for AI analysis' },
             },
             required: ['renderMode'],
           },
         },
         {
           name: 'start_audio_analysis',
-          description: 'Start an asynchronous audio analysis task. This tool triggers the rendering and AI analysis in the background and returns immediately with a task ID. Use get_analysis_status to check progress and results.',
+          description: 'Start async audio analysis task',
           inputSchema: {
             type: 'object',
             properties: {
-              trackId: { 
-                type: 'string', 
-                description: 'Track ID to analyze (number as string, or "master" for master track). Used in solo mode.' 
-              },
-              trackIds: {
-                type: 'array',
-                items: { type: 'string' },
-                description: 'Array of track IDs for multi-track analysis (used in "multi" renderMode)'
-              },
-              renderMode: {
-                type: 'string',
-                enum: ['solo', 'master', 'chorus', 'multi'],
-                description: 'Render mode: solo=isolate single track, master=full mix, chorus=time range of master, multi=multiple tracks together'
-              },
-              startTime: { 
-                type: 'number', 
-                description: 'Start time in seconds (default: 0)' 
-              },
-              endTime: { 
-                type: 'number', 
-                description: 'End time in seconds (default: project length, max 30 seconds for optimal analysis)' 
-              },
+              trackId: { type: 'string' },
+              trackIds: { type: 'array', items: { type: 'string' } },
+              renderMode: { type: 'string', enum: ['solo', 'master', 'chorus', 'multi'] },
+              startTime: { type: 'number' },
+              endTime: { type: 'number' },
+              context: { type: 'string' },
             },
             required: ['renderMode'],
           },
         },
         {
           name: 'get_analysis_status',
-          description: 'Get the status and results of an asynchronous audio analysis task started with start_audio_analysis.',
+          description: 'Get status of async analysis task',
           inputSchema: {
             type: 'object',
             properties: {
-              taskId: {
-                type: 'string',
-                description: 'The task ID returned by start_audio_analysis'
-              }
+              taskId: { type: 'string' },
             },
             required: ['taskId'],
           },
@@ -633,7 +337,6 @@ class ReaperMCPServer {
       const { name, arguments: args } = request.params;
 
       try {
-        // Initialize client if needed
         await this.client.connect();
 
         switch (name) {
@@ -685,7 +388,7 @@ class ReaperMCPServer {
               volumeDb?: number 
             };
             await this.client.setTrackSend(sourceTrackIndex, destTrackIndex, volumeDb ?? 0);
-            return { content: [{ type: 'text', text: `Created send from track ${sourceTrackIndex} to track ${destTrackIndex} at ${volumeDb ?? 0} dB` }] };
+            return { content: [{ type: 'text', text: `Created send from track ${sourceTrackIndex} to track ${destTrackIndex}` }] };
           }
 
           case 'set_track_output': {
@@ -722,25 +425,7 @@ class ReaperMCPServer {
 
           case 'list_available_fx': {
             const data = await this.client.listAvailableFX();
-            return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
-          }
-
-          case 'get_available_plugins': {
-            const { searchQuery, maxResults } = args as { searchQuery?: string; maxResults?: number };
-            const result = await this.client.getAvailablePlugins(searchQuery, maxResults);
-            
-            const header = searchQuery 
-              ? `Found ${result.count} plugins matching "${searchQuery}" (source: ${result.source}):`
-              : `Available plugins (source: ${result.source}):`;
-            
-            const pluginsList = result.plugins.map((plugin, i) => `${i + 1}. ${plugin}`).join('\n');
-            
-            return { 
-              content: [{ 
-                type: 'text', 
-                text: `${header}\n${pluginsList}\n\nTip: Use the exact plugin name with add_fx_to_track or add_fx_to_track_smart.`
-              }] 
-            };
+            return { content: [{ type: 'text', text: `Available FX plugins (${data.length}):\n${data.slice(0, 50).join('\n')}` }] };
           }
 
           case 'get_track_fx': {
@@ -753,11 +438,10 @@ class ReaperMCPServer {
             const { trackIndex, fxName, vendor } = args as { 
               trackIndex: number; 
               fxName: string;
-              vendor?: 'waves' | 'fabfilter' | 'generic';
+              vendor?: string;
             };
             const result = await this.client.addFXToTrack(trackIndex, fxName, vendor);
-            const channelInfo = result.isMono ? 'mono' : `${result.trackChannels} channels`;
-            return { content: [{ type: 'text', text: `Added ${result.fxName} (${channelInfo}, vendor: ${result.vendor}) at index ${result.fxIndex}` }] };
+            return { content: [{ type: 'text', text: `Added ${result.fxName} at index ${result.fxIndex}` }] };
           }
 
           case 'remove_fx_from_track': {
@@ -804,30 +488,6 @@ class ReaperMCPServer {
             return { content: [{ type: 'text', text: `${enabled ? 'Enabled' : 'Disabled'} FX at index ${fxIndex}` }] };
           }
 
-          case 'tweak_fx_parameter': {
-            const { trackIndex, fxName, paramIndex, normalizedValue } = args as {
-              trackIndex: number;
-              fxName: string;
-              paramIndex: number;
-              normalizedValue: number;
-            };
-            const result = await this.client.tweakFXParameter(trackIndex, fxName, paramIndex, normalizedValue);
-            return { content: [{ type: 'text', text: `Tweaked "${result.fxName}" param ${result.paramName} (${result.paramIndex}) to ${normalizedValue}` }] };
-          }
-
-          case 'manage_track_routing': {
-            const { action, sourceTrackIndex, destTrackIndex, enable, sendVolumeDb, sendPan } = args as {
-              action: 'add_send' | 'remove_send' | 'set_master_send';
-              sourceTrackIndex: number;
-              destTrackIndex?: number;
-              enable?: boolean;
-              sendVolumeDb?: number;
-              sendPan?: number;
-            };
-            const result = await this.client.manageTrackRouting(action, sourceTrackIndex, destTrackIndex, enable, sendVolumeDb, sendPan);
-            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-          }
-
           case 'split_item': {
             const { trackIndex, itemIndex, position } = args as {
               trackIndex: number;
@@ -844,37 +504,66 @@ class ReaperMCPServer {
             return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
           }
 
-          case 'analyze_media_item': {
-            const { trackIndex, itemIndex } = args as { trackIndex: number; itemIndex: number };
-            const data = await this.client.analyzeMediaItem(trackIndex, itemIndex);
-            return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
-          }
-
           case 'check_reaper_connection': {
             try {
-              await this.client.connect();
               await this.client.getProjectInfo();
               return { content: [{ type: 'text', text: 'REAPER file bridge is connected and responding' }] };
             } catch (error) {
               return { 
                 content: [{ 
                   type: 'text', 
-                  text: 'REAPER file bridge is not available. Please ensure:\n1. The file-bridge.lua script is loaded in REAPER\n2. The script is running (check REAPER console)\n3. IPC directory is accessible' 
+                  text: 'REAPER file bridge is not available. Please ensure the Lua script is running in REAPER.' 
                 }] 
               };
             }
           }
 
           case 'analyze_and_suggest_mix': {
-            return this.handleAnalyzeAndSuggestMix(args as any);
+            if (!this.analyzer) {
+              return { content: [{ type: 'text', text: 'AI Analyzer not initialized. Please set OPENAI_API_KEY in .env' }] };
+            }
+            
+            const { trackId, trackIds, renderMode, startTime = 0, endTime, context } = args as any;
+            
+            // Start render
+            const renderResult = await this.client.isolateAndRender(
+              trackId || '0',
+              startTime,
+              endTime || 30,
+              renderMode as any,
+              trackIds
+            );
+            
+            // Wait for render to complete
+            await this.waitForRender(renderResult.statusFile);
+            
+            // Analyze
+            const analysis = await this.analyzer.analyze(renderResult.filePath, context);
+            
+            return { 
+              content: [{ 
+                type: 'text', 
+                text: `## AI Mix Analysis\n\n${analysis.suggestions}\n\n*Analyzed using ${analysis.provider} ${analysis.model}*` 
+              }] 
+            };
           }
 
           case 'start_audio_analysis': {
-            return this.handleStartAudioAnalysis(args as any);
+            if (!this.analyzer) {
+              return { content: [{ type: 'text', text: 'AI Analyzer not initialized' }] };
+            }
+            
+            const task = this.analyzer.createTask(args);
+            return { content: [{ type: 'text', text: `Analysis task started. Task ID: ${task.taskId}` }] };
           }
 
           case 'get_analysis_status': {
-            return this.handleGetAnalysisStatus(args as any);
+            const { taskId } = args as { taskId: string };
+            const task = this.analyzer?.getTask(taskId);
+            if (!task) {
+              return { content: [{ type: 'text', text: `Task ${taskId} not found` }] };
+            }
+            return { content: [{ type: 'text', text: JSON.stringify(task, null, 2) }] };
           }
 
           default:
@@ -890,420 +579,31 @@ class ReaperMCPServer {
     });
   }
 
-  // ===== ASYNC AUDIO ANALYSIS IMPLEMENTATION =====
-
-  private async handleStartAudioAnalysis(args: any) {
-    const { 
-      trackId, 
-      trackIds, 
-      renderMode = 'solo',
-      startTime = 0, 
-      endTime 
-    } = args;
-
-    // Validate parameters
-    if (renderMode === 'solo' && !trackId) {
-      return { 
-        content: [{ type: 'text', text: 'Error: trackId is required for solo render mode' }],
-        isError: true
-      };
-    }
-    if (renderMode === 'multi' && (!trackIds || trackIds.length === 0)) {
-      return { 
-        content: [{ type: 'text', text: 'Error: trackIds array is required for multi render mode' }],
-        isError: true
-      };
-    }
-
-    // Create task
-    const task = this.taskManager.createTask({
-      trackId, trackIds, renderMode, startTime, endTime
-    });
-
-    // Start async process (don't await)
-    this.runAnalysisTask(task.taskId);
-
-    return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify({
-          taskId: task.taskId,
-          status: 'pending',
-          message: 'Audio analysis started. Use get_analysis_status to check progress.',
-          estimatedTime: '30-60 seconds'
-        }, null, 2)
-      }]
-    };
-  }
-
-  private async runAnalysisTask(taskId: string) {
-    try {
-      const task = this.taskManager.getTask(taskId);
-      if (!task) return;
-
-      const { trackId, trackIds, renderMode, startTime, endTime } = task.params;
-
-      // Step 1: Get project info
-      this.taskManager.updateTask(taskId, { status: 'rendering', progress: 10 });
-      
-      const projectInfo = await this.client.getProjectInfo();
-      // Support longer audio analysis (up to 30 seconds) thanks to async architecture
-      const actualEndTime = Math.min(endTime ?? projectInfo.projectLength, startTime + 30);
-
-      // Step 2: Start render
-      this.taskManager.updateTask(taskId, { progress: 20 });
-      
-      const effectiveTrackId = trackId || '0';
-      const renderResult = await this.client.isolateAndRender(
-        effectiveTrackId,
-        startTime,
-        actualEndTime,
-        renderMode,
-        trackIds
-      );
-
-      const statusFilePath = (renderResult as any).statusFile;
-      const audioFilePath = (renderResult as any).filePath;
-
-      this.taskManager.updateTask(taskId, { 
-        renderStatusFile: statusFilePath,
-        audioFilePath: audioFilePath,
-        progress: 30 
-      });
-
-      // Step 3: Poll for render completion
-      let renderCompleted = false;
-      let attempts = 0;
-      const maxAttempts = 60;
-
-      while (!renderCompleted && attempts < maxAttempts) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        attempts++;
-
-        try {
-          const statusData = await fs.readFile(statusFilePath, 'utf-8');
-          const status = JSON.parse(statusData);
-
-          if (status.status === 'completed') {
-            renderCompleted = true;
-            this.taskManager.updateTask(taskId, { 
-              audioFilePath: status.filePath,
-              progress: 50 
-            });
-          } else if (status.status === 'failed') {
-            throw new Error(`Render failed: ${status.error}`);
-          }
-        } catch (e: any) {
-          if (e.code !== 'ENOENT') {
-            // Ignore file not found, retry
-          }
-        }
-      }
-
-      if (!renderCompleted) {
-        throw new Error('Render timeout');
-      }
-
-      // Step 4: Analyze loudness using FFmpeg (replaces get_sws_loudness)
-      this.taskManager.updateTask(taskId, { status: 'analyzing', progress: 60 });
-      
-      let loudnessData: LoudnessData;
+  private async waitForRender(statusFile: string | undefined): Promise<void> {
+    if (!statusFile) return;
+    
+    for (let i = 0; i < 60; i++) {
       try {
-        loudnessData = await analyzeLoudness(audioFilePath!);
-        console.error(`[runAnalysisTask] Loudness analyzed: LUFS-I=${loudnessData.integratedLufs.toFixed(1)}, TruePeak=${loudnessData.truePeak.toFixed(1)} dBTP`);
-      } catch (loudnessError) {
-        console.error('[runAnalysisTask] Failed to analyze loudness, using defaults:', loudnessError);
-        loudnessData = {
-          integratedLufs: -23.0,
-          truePeak: -1.0,
-          loudnessRange: 0.0,
-          threshold: -30.0
-        };
-      }
-
-      // Step 5: AI Analysis
-      this.taskManager.updateTask(taskId, { progress: 70 });
-      
-      const audioBuffer = await fs.readFile(audioFilePath!);
-      const base64Audio = audioBuffer.toString('base64');
-
-      const userPrompt = `你是一位专业的母带与混音工程师。请聆听这段音频，结合响度数据（当前 LUFS-I: ${loudnessData.integratedLufs.toFixed(1)}, True Peak: ${loudnessData.truePeak.toFixed(1)} dBTP, 响度范围: ${loudnessData.loudnessRange.toFixed(1)} LU），分析其频段均衡度、掩蔽效应和动态。请仅返回一段严格的 JSON 格式数据，包含 'analysis' (诊断说明) 和 'actions' (针对效果器的调整指令数组)。`;
-
-      let aiResponse: string;
-      try {
-        const response = await this.openai.chat.completions.create({
-          model: process.env.AUDIO_MODEL_NAME || 'gemini-3.1-pro-preview',
-          messages: [
-            {
-              role: 'user',
-              content: [
-                { type: 'text', text: userPrompt },
-                { type: 'input_audio', input_audio: { data: base64Audio, format: 'wav' } }
-              ]
-            }
-          ],
-          max_tokens: 2000,
-        });
-        aiResponse = response.choices[0]?.message?.content || '';
-      } catch (audioError: any) {
-        const dataUri = `data:audio/wav;base64,${base64Audio}`;
-        const response = await this.openai.chat.completions.create({
-          model: process.env.AUDIO_MODEL_NAME || 'gemini-3.1-pro-preview',
-          messages: [
-            {
-              role: 'user',
-              content: [
-                { type: 'text', text: userPrompt },
-                { type: 'text', text: dataUri }
-              ]
-            }
-          ],
-          max_tokens: 2000,
-        });
-        aiResponse = response.choices[0]?.message?.content || '';
-      }
-
-      // Step 6: Parse result
-      this.taskManager.updateTask(taskId, { progress: 90 });
-      
-      let analysisResult: any;
-      try {
-        const jsonMatch = aiResponse.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-        const jsonStr = jsonMatch ? jsonMatch[1].trim() : aiResponse.trim();
-        analysisResult = JSON.parse(jsonStr);
+        const data = await fs.readFile(statusFile, 'utf-8');
+        const status = JSON.parse(data);
+        if (status.status === 'completed') return;
+        if (status.status === 'failed') throw new Error('Render failed');
       } catch (e) {
-        analysisResult = {
-          analysis: 'Failed to parse AI response',
-          actions: [],
-          rawResponse: aiResponse
-        };
+        // File might not exist yet
       }
-
-      // Cleanup
-      await fs.unlink(audioFilePath!).catch(() => {});
-      await fs.unlink(statusFilePath).catch(() => {});
-
-      // Complete
-      this.taskManager.updateTask(taskId, {
-        status: 'completed',
-        progress: 100,
-        result: analysisResult
-      });
-
-    } catch (error: any) {
-      this.taskManager.updateTask(taskId, {
-        status: 'failed',
-        error: error.message
-      });
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
+    throw new Error('Render timeout');
   }
 
-  private async handleGetAnalysisStatus(args: { taskId: string }) {
-    const { taskId } = args;
-    const task = this.taskManager.getTask(taskId);
-
-    if (!task) {
-      return {
-        content: [{ type: 'text', text: JSON.stringify({ error: 'Task not found' }, null, 2) }],
-        isError: true
-      };
-    }
-
-    const response: any = {
-      taskId: task.taskId,
-      status: task.status,
-      progress: task.progress,
-      createdAt: task.createdAt,
-      updatedAt: task.updatedAt
-    };
-
-    if (task.status === 'completed') {
-      response.result = task.result;
-    } else if (task.status === 'failed') {
-      response.error = task.error;
-    }
-
-    return {
-      content: [{ type: 'text', text: JSON.stringify(response, null, 2) }]
-    };
-  }
-
-  // ===== SYNC VERSION (for backward compatibility) =====
-
-  private async handleAnalyzeAndSuggestMix(args: any) {
-    const { 
-      trackId, 
-      trackIds, 
-      renderMode = 'solo',
-      startTime = 0, 
-      endTime 
-    } = args;
-
-    if (renderMode === 'solo' && !trackId) {
-      return { 
-        content: [{ type: 'text', text: 'Error: trackId is required for solo render mode' }],
-        isError: true
-      };
-    }
-    if (renderMode === 'multi' && (!trackIds || trackIds.length === 0)) {
-      return { 
-        content: [{ type: 'text', text: 'Error: trackIds array is required for multi render mode' }],
-        isError: true
-      };
-    }
-
-    const projectInfo = await this.client.getProjectInfo();
-    // Support longer audio analysis (up to 30 seconds) thanks to async architecture
-    const actualEndTime = Math.min(endTime ?? projectInfo.projectLength, startTime + 30);
-
-    const effectiveTrackId = trackId || '0';
-    const renderResult = await this.client.isolateAndRender(
-      effectiveTrackId, 
-      startTime, 
-      actualEndTime,
-      renderMode,
-      trackIds
-    );
-    
-    const statusFilePath = (renderResult as any).statusFile;
-    if (!statusFilePath) {
-      throw new Error('No status file returned from isolate_and_render');
-    }
-
-    console.error(`[analyze_and_suggest_mix] Waiting for render to complete. Status file: ${statusFilePath}`);
-    
-    let renderCompleted = false;
-    let renderFilePath = '';
-    const maxPollAttempts = 60;
-    let pollAttempts = 0;
-    
-    while (!renderCompleted && pollAttempts < maxPollAttempts) {
-      try {
-        const statusData = await fs.readFile(statusFilePath, 'utf-8');
-        const status = JSON.parse(statusData);
-        
-        console.error(`[analyze_and_suggest_mix] Poll ${pollAttempts + 1}: status = ${status.status}`);
-        
-        if (status.status === 'completed') {
-          renderCompleted = true;
-          renderFilePath = status.filePath || (renderResult as any).filePath;
-          console.error(`[analyze_and_suggest_mix] Render completed! File: ${renderFilePath}, Size: ${status.fileSize} bytes`);
-        } else if (status.status === 'failed') {
-          throw new Error(`Render failed: ${status.error || 'Unknown error'}`);
-        } else {
-          await new Promise(resolve => setTimeout(resolve, 1000));
-          pollAttempts++;
-        }
-      } catch (error: any) {
-        if (error.code === 'ENOENT' || error instanceof SyntaxError) {
-          await new Promise(resolve => setTimeout(resolve, 1000));
-          pollAttempts++;
-        } else {
-          throw error;
-        }
-      }
-    }
-    
-    if (!renderCompleted) {
-      throw new Error('Render timeout after 60 seconds');
-    }
-
-    // Analyze loudness using FFmpeg (replaces get_sws_loudness)
-    let loudnessData: LoudnessData;
-    try {
-      loudnessData = await analyzeLoudness(renderFilePath);
-      console.error(`[analyze_and_suggest_mix] Loudness analyzed: LUFS-I=${loudnessData.integratedLufs.toFixed(1)}, TruePeak=${loudnessData.truePeak.toFixed(1)} dBTP`);
-    } catch (loudnessError) {
-      console.error('[analyze_and_suggest_mix] Failed to analyze loudness, using defaults:', loudnessError);
-      loudnessData = {
-        integratedLufs: -23.0,
-        truePeak: -1.0,
-        loudnessRange: 0.0,
-        threshold: -30.0
-      };
-    }
-    
-    console.error(`[analyze_and_suggest_mix] Reading audio file: ${renderFilePath}`);
-    const audioBuffer = await fs.readFile(renderFilePath);
-    const base64Audio = audioBuffer.toString('base64');
-    console.error(`[analyze_and_suggest_mix] Audio file size: ${audioBuffer.length} bytes, Base64 length: ${base64Audio.length}`);
-    
-    const userPrompt = `你是一位专业的母带与混音工程师。请聆听这段音频，结合响度数据（当前 LUFS-I: ${loudnessData.integratedLufs.toFixed(1)}, True Peak: ${loudnessData.truePeak.toFixed(1)} dBTP, 响度范围: ${loudnessData.loudnessRange.toFixed(1)} LU），分析其频段均衡度、掩蔽效应和动态。请仅返回一段严格的 JSON 格式数据，包含 'analysis' (诊断说明) 和 'actions' (针对效果器的调整指令数组)。`;
-
-    let aiResponse: string;
-    try {
-      console.error(`[analyze_and_suggest_mix] Sending to AI with input_audio format...`);
-      const response = await this.openai.chat.completions.create({
-        model: process.env.AUDIO_MODEL_NAME || 'gemini-3.1-pro-preview',
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: userPrompt },
-              { type: 'input_audio', input_audio: { data: base64Audio, format: 'wav' } }
-            ]
-          }
-        ],
-        max_tokens: 2000,
-      });
-      aiResponse = response.choices[0]?.message?.content || 'No response from AI';
-      console.error(`[analyze_and_suggest_mix] AI response received (input_audio format)`);
-    } catch (audioError: any) {
-      console.error(`[analyze_and_suggest_mix] input_audio format failed, trying data URI format: ${audioError.message}`);
-      const dataUri = `data:audio/wav;base64,${base64Audio}`;
-      const response = await this.openai.chat.completions.create({
-        model: process.env.AUDIO_MODEL_NAME || 'gemini-3.1-pro-preview',
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: userPrompt },
-              { type: 'text', text: dataUri }
-            ]
-          }
-        ],
-        max_tokens: 2000,
-      });
-      aiResponse = response.choices[0]?.message?.content || 'No response from AI';
-      console.error(`[analyze_and_suggest_mix] AI response received (data URI format)`);
-    }
-
-    let analysisResult: any;
-    try {
-      const jsonMatch = aiResponse.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-      const jsonStr = jsonMatch ? jsonMatch[1].trim() : aiResponse.trim();
-      analysisResult = JSON.parse(jsonStr);
-      console.error(`[analyze_and_suggest_mix] Successfully parsed AI response as JSON`);
-    } catch (e) {
-      console.error(`[analyze_and_suggest_mix] Failed to parse AI response as JSON: ${e}`);
-      analysisResult = {
-        analysis: 'Failed to parse AI response',
-        actions: [],
-        rawResponse: aiResponse,
-        parseError: String(e)
-      };
-    }
-
-    try {
-      await fs.unlink(renderFilePath).catch(() => {});
-      await fs.unlink(statusFilePath).catch(() => {});
-      console.error(`[analyze_and_suggest_mix] Cleaned up temporary files`);
-    } catch (cleanupError) {
-      console.error('[analyze_and_suggest_mix] Failed to cleanup temporary file:', cleanupError);
-    }
-
-    return { 
-      content: [{ 
-        type: 'text', 
-        text: JSON.stringify(analysisResult, null, 2)
-      }] 
-    };
+  private async cleanupOldTasks() {
+    await this.analyzer?.cleanupOldTasks();
   }
 
   async run() {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
-    console.error('REAPER MCP server (file-based IPC) running on stdio');
+    Logger.info('REAPER MCP AI Analyzing server running on stdio');
   }
 }
 
