@@ -5,115 +5,263 @@
 <a name="english"></a>
 ## English
 
-A Model Context Protocol (MCP) server for REAPER DAW with **AI-powered audio analysis**. Control REAPER through natural language and get intelligent mix suggestions from any AI model with audio capabilities.
+A Model Context Protocol (MCP) server for REAPER DAW with **AI-powered audio analysis**. Control REAPER through natural language and get intelligent mix suggestions from AI models with audio capabilities.
 
-### Features
+### 🚀 Features
 
-- **30+ MCP tools** for REAPER control (tracks, FX, routing, media items)
-- **AI Audio Analysis** - Analyze mixes with ANY audio-capable AI model
-- **Multi-Provider Support** - OpenAI, Google Gemini, Anthropic Claude, or any OpenAI-compatible API
+- **20+ MCP Tools** for REAPER control (tracks, FX, routing, media items)
+- **AI Audio Analysis** - Analyze mixes with GPT-4o Audio Preview or compatible models
 - **File-based IPC** - No network required, works on macOS/Windows/Linux
+- **Multi-Provider Support** - OpenAI (Gemini/Claude support coming soon)
 
-### AI Audio Analysis
+### 📁 Project Structure
 
-The standout feature of this MCP server is **AI-powered audio analysis**. You can use ANY AI model that supports audio input:
-
-#### Supported AI Providers
-
-| Provider | Model Examples | Base URL |
-|----------|---------------|----------|
-| **OpenAI** | gpt-4o-audio-preview, gpt-4o-mini-audio-preview | https://api.openai.com/v1 |
-| **Google** | gemini-1.5-pro, gemini-1.5-flash | https://generativelanguage.googleapis.com |
-| **Anthropic** | claude-3-opus, claude-3-sonnet | https://api.anthropic.com |
-| **Custom** | Any OpenAI-compatible API | Your custom endpoint |
-
-### Installation
-
-```bash
-git clone https://github.com/[your-username]/reaper-mcp-ai-analyzing.git
-cd reaper-mcp-ai-analyzing
-npm install
-npm run build
-cp .env.example .env
-# Edit .env with your AI provider settings
+```
+reaper-mcp-ai-analyzing/
+├── src/
+│   ├── index.ts              # MCP Server main entry
+│   ├── types/
+│   │   └── reaper.ts         # Type definitions
+│   ├── utils/
+│   │   ├── env.ts            # Environment config
+│   │   ├── logger.ts         # Logging utility
+│   │   └── audio.ts          # Audio processing
+│   ├── bridge/
+│   │   └── file-client.ts    # File IPC client
+│   └── ai/
+│       ├── analyzer.ts       # Audio analysis coordinator
+│       └── providers/
+│           ├── base.ts       # Base AI provider
+│           └── openai.ts     # OpenAI implementation
+├── bridge/
+│   └── file-bridge.lua       # REAPER Lua bridge script
+└── package.json
 ```
 
-### Configuration (.env)
+### 🔧 Installation
 
 ```bash
-# Required: API Key from your AI provider
+# Clone the repository
+git clone https://github.com/YangJue213-spec/reaper-mcp-ai-analyzing.git
+cd reaper-mcp-ai-analyzing
+
+# Install dependencies
+npm install
+
+# Build the project
+npm run build
+
+# Configure environment
+cp .env.example .env
+# Edit .env with your OpenAI API key
+```
+
+### ⚙️ Configuration (.env)
+
+```bash
+# Required: OpenAI API Key
 OPENAI_API_KEY=your_api_key_here
 
-# Required: Base URL of your AI provider
+# Optional: Base URL (for custom endpoints)
 OPENAI_BASE_URL=https://api.openai.com/v1
 
-# Required: AI Model Name (must support audio input)
+# Optional: AI Model
 AUDIO_MODEL_NAME=gpt-4o-audio-preview
+
+# Optional: Script timeout (ms)
+REAPER_SCRIPT_TIMEOUT=30000
 ```
 
-### AI Analysis Tools
+### 🎮 MCP Tools
 
-- `analyze_and_suggest_mix` - AI analyzes audio and suggests mix improvements
+#### Project & Track Control
+- `get_project_info` - Get project sample rate, tempo, track count
+- `get_track_info` - Get track details (volume, pan, FX count, etc.)
+- `create_track` - Create new track with optional name
+- `delete_track` - Delete track by index
+- `set_track_name` - Rename a track
+- `set_track_volume` - Set volume in dB
+- `set_track_pan` - Set pan (-1 to 1)
+- `set_track_send` - Create send to another track
+- `set_track_output` - Route track output
+
+#### FX Control
+- `get_track_fx` - List all FX on a track
+- `add_fx_to_track` - Add plugin (supports Waves, FabFilter, generic)
+- `remove_fx_from_track` - Remove FX by index
+- `get_fx_params` - Get all parameters of an FX
+- `set_fx_param` - Set parameter by absolute value
+- `set_fx_param_normalized` - Set parameter (0-1 normalized)
+- `set_fx_enabled` - Enable/disable FX
+
+#### Media Items
+- `get_item_info` - Get item position, length, fades
+- `split_item` - Split item at position
+
+#### AI Analysis (Core Feature)
+- `analyze_and_suggest_mix` - Render and analyze audio with AI
 - `start_audio_analysis` - Start async analysis task
-- `get_analysis_status` - Get analysis results
+- `get_analysis_status` - Check analysis progress
+
+### 🔌 MCP Configuration
+
+Add to your MCP client settings (Claude Desktop, Cline, etc.):
+
+```json
+{
+  "mcpServers": {
+    "reaper-ai": {
+      "command": "node",
+      "args": ["/path/to/reaper-mcp-ai-analyzing/build/index.js"],
+      "env": {
+        "OPENAI_API_KEY": "your_api_key_here",
+        "OPENAI_BASE_URL": "https://api.openai.com/v1",
+        "AUDIO_MODEL_NAME": "gpt-4o-audio-preview"
+      }
+    }
+  }
+}
+```
+
+### 🎵 How to Use
+
+#### 1. Setup REAPER Bridge
+1. Open REAPER
+2. Go to **Actions** → **Show Action List**
+3. Click **New Action** → **Load ReaScript**
+4. Select `bridge/file-bridge.lua`
+5. The bridge is now running (check REAPER console for "REAPER MCP Bridge started")
+
+#### 2. Start MCP Server
+```bash
+npm start
+```
+
+#### 3. Use Natural Language Prompts
+
+**Example 1: Analyze a track**
+```
+"Analyze the lead vocal track (track 0) and suggest EQ improvements"
+```
+
+**Example 2: Check mix loudness**
+```
+"Check the overall mix loudness and tell me if it meets streaming standards"
+```
+
+**Example 3: Add FX and analyze**
+```
+"Add a compressor to the bass track, then analyze if the dynamics are better"
+```
+
+### 📝 Example Prompts
+
+```markdown
+1. "Get project info and list all tracks"
+2. "Set track 0 volume to -6 dB and pan to 0.2"
+3. "Add Pro-Q 3 to track 1 and analyze the frequency balance"
+4. "Check REAPER connection status"
+5. "Analyze the master mix from 0 to 30 seconds"
+```
 
 ---
 
 <a name="中文"></a>
 ## 中文
 
-带有 **AI 音频分析功能** 的 REAPER MCP 服务器。通过自然语言控制 REAPER，并从任何支持音频的 AI 模型获取智能混音建议。
+带有 **AI 音频分析功能** 的 REAPER MCP 服务器。通过自然语言控制 REAPER，并从 AI 模型获取智能混音建议。
 
-### 功能特性
+### 🚀 功能特性
 
-- **30+ MCP 工具** 用于 REAPER 控制（轨道、效果器、路由、媒体项目）
-- **AI 音频分析** - 使用任何支持音频的 AI 模型分析混音
-- **多提供商支持** - OpenAI、Google Gemini、Anthropic Claude 或任何兼容 OpenAI 的 API
+- **20+ MCP 工具** 用于 REAPER 控制
+- **AI 音频分析** - 使用 GPT-4o Audio Preview 分析混音
 - **文件 IPC** - 无需网络，支持 macOS/Windows/Linux
+- **多提供商支持** - OpenAI（即将支持 Gemini/Claude）
 
-### AI 音频分析
-
-本服务器的突出功能是 **AI 驱动的音频分析**。您可以使用任何支持音频输入的 AI 模型：
-
-#### 支持的 AI 提供商
-
-| 提供商 | 模型示例 | Base URL |
-|--------|---------|----------|
-| **OpenAI** | gpt-4o-audio-preview, gpt-4o-mini-audio-preview | https://api.openai.com/v1 |
-| **Google** | gemini-1.5-pro, gemini-1.5-flash | https://generativelanguage.googleapis.com |
-| **Anthropic** | claude-3-opus, claude-3-sonnet | https://api.anthropic.com |
-| **自定义** | 任何兼容 OpenAI 的 API | 您的自定义端点 |
-
-### 安装
+### 🔧 安装
 
 ```bash
-git clone https://github.com/[your-username]/reaper-mcp-ai-analyzing.git
+git clone https://github.com/YangJue213-spec/reaper-mcp-ai-analyzing.git
 cd reaper-mcp-ai-analyzing
 npm install
 npm run build
 cp .env.example .env
-# 编辑 .env 配置您的 AI 提供商设置
+# 编辑 .env 添加你的 OpenAI API 密钥
 ```
 
-### 配置 (.env)
+### ⚙️ 配置 (.env)
 
 ```bash
-# 必需：AI 提供商的 API 密钥
 OPENAI_API_KEY=your_api_key_here
-
-# 必需：AI 提供商的 Base URL
 OPENAI_BASE_URL=https://api.openai.com/v1
-
-# 必需：AI 模型名称（必须支持音频输入）
 AUDIO_MODEL_NAME=gpt-4o-audio-preview
 ```
 
-### AI 分析工具
+### 🔌 MCP 配置
 
-- `analyze_and_suggest_mix` - AI 分析音频并提出混音改进建议
-- `start_audio_analysis` - 启动异步分析任务
-- `get_analysis_status` - 获取分析结果
+添加到 Claude Desktop、Cline 等 MCP 客户端：
 
-### 许可证
+```json
+{
+  "mcpServers": {
+    "reaper-ai": {
+      "command": "node",
+      "args": ["/path/to/reaper-mcp-ai-analyzing/build/index.js"],
+      "env": {
+        "OPENAI_API_KEY": "your_api_key_here"
+      }
+    }
+  }
+}
+```
 
-MIT License - 详见 [LICENSE](LICENSE) 文件
+### 🎵 使用方法
+
+#### 1. 设置 REAPER 桥接
+1. 打开 REAPER
+2. 进入 **动作** → **显示动作列表**
+3. 点击 **新建动作** → **加载 ReaScript**
+4. 选择 `bridge/file-bridge.lua`
+5. 桥接已启动（在 REAPER 控制台查看）
+
+#### 2. 启动 MCP 服务器
+```bash
+npm start
+```
+
+#### 3. 使用自然语言
+
+**示例 1：分析轨道**
+```
+"分析主唱轨道（轨道 0）并建议 EQ 调整"
+```
+
+**示例 2：检查响度**
+```
+"检查整体混音响度，是否符合流媒体标准"
+```
+
+### 📝 提示词示例
+
+```markdown
+1. "获取工程信息并列出所有轨道"
+2. "将轨道 0 音量设为 -6 dB，声像设为 0.2"
+3. "给轨道 1 添加 Pro-Q 3 并分析频响平衡"
+4. "检查 REAPER 连接状态"
+5. "分析主混音从 0 到 30 秒的部分"
+```
+
+### 🛠️ 故障排除
+
+**"REAPER file bridge is not available"**
+- 确保 Lua 脚本已在 REAPER 中运行
+- 检查 REAPER 控制台是否有错误信息
+- 确认 `/tmp/reaper-mcp` 目录可访问
+
+**"AI Analyzer not initialized"**
+- 检查 `.env` 文件中的 `OPENAI_API_KEY`
+- 确保已运行 `npm run build`
+
+### 📜 License
+
+MIT License - See [LICENSE](LICENSE) file
